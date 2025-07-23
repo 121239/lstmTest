@@ -31,8 +31,8 @@ def load_and_prepare_data(stock_files):
         if(len(df) < 360) :
             continue
 
-        if i > 500:
-            continue
+        # if i > 500:
+        #     continue
 
         # 添加股票ID
         stock_id = os.path.basename(file_path).split('.')[0]
@@ -104,16 +104,15 @@ def load_and_prepare_data(stock_files):
     return full_df
 
 # 2. 创建数据集
-def create_datasets(df, prediction_horizon=8, history_length=24):
+def create_datasets(df, prediction_horizon, history_length):
     """
     创建TFT数据集
     prediction_horizon: 预测时间步长 (8小时=2天)
     history_length: 历史数据长度 (24小时=6天)
     """
-    # 训练/验证集分割点 (按时间索引)
-    max_time = df["time_idx"].max()
-    training_cutoff = max_time - prediction_horizon - history_length
-
+    # 首先计算划分点
+    total_length = df["time_idx"].max()
+    train_end = int(total_length * 0.7)
     df["hour"] = df["hour"].astype(str).astype("category")
     df["weekday"] = df["weekday"].astype(str).astype("category")
     df["month"] = df["month"].astype(str).astype("category")
@@ -121,7 +120,7 @@ def create_datasets(df, prediction_horizon=8, history_length=24):
     # print(full_data.groupby('stock_id').tail(10))
     # 创建时间序列数据集
     dataset = TimeSeriesDataSet(
-        df[lambda x: x.time_idx <= training_cutoff],
+        df[lambda x: x.time_idx <= train_end],
         time_idx="time_idx",
         target="收盘",
         group_ids=["group_id"],
@@ -146,7 +145,7 @@ def create_datasets(df, prediction_horizon=8, history_length=24):
     # 创建验证集
     validation = TimeSeriesDataSet.from_dataset(
         dataset,
-        df[lambda x: x.time_idx > training_cutoff - history_length],
+        df[lambda x: (x.time_idx > train_end - history_length)],
         predict=True,
         stop_randomization=True
     )
@@ -314,7 +313,7 @@ def process_xlsx_files(folder_path):
     return xlsx_files
 
 path = "D:/MyTool/tdx/T0002/export/OneHour/"
-output_path = path +"dataHandle/20250721.csv"
+output_path = path +"dataHandle/20250723.csv"
 eps = 1e-6  # 极小值，防止除零
 def check(full_data):
     # numeric_cols = full_data.columns  # 替换为你的实际列名
@@ -345,7 +344,7 @@ if __name__ == "__main__":
 
     # 加载多只股票数据
     # stock_files = process_xlsx_files(path)
-    # # 预处理数据
+    # # # 预处理数据
     # full_data = load_and_prepare_data(stock_files)
     # exit()
 
@@ -356,8 +355,6 @@ if __name__ == "__main__":
     prediction_horizon = 8  # 预测未来8小时 (2天)
     history_length = 24      # 使用24小时历史数据
     train_dataset, val_dataset = create_datasets(full_data, prediction_horizon, history_length)
-
-
 
     # 训练模型
     tft_model = train_tft_model(train_dataset, val_dataset, epochs=100)
