@@ -114,7 +114,7 @@ def load_and_prepare_data(stock_files):
     return full_df
 
 # 2. 创建数据集
-def create_datasets(df, prediction_horizon, history_length):
+def create_datasets(df, prediction_horizon = 8, history_length=24):
     """
     创建TFT数据集
     prediction_horizon: 预测时间步长 (8小时=2天)
@@ -124,14 +124,24 @@ def create_datasets(df, prediction_horizon, history_length):
     max_time = df["time_idx"].max()
     training_cutoff = max_time - prediction_horizon - history_length
 
-    df["hour"] = df["hour"].astype(str).astype("category")
-    df["weekday"] = df["weekday"].astype(str).astype("category")
-    df["month"] = df["month"].astype(str).astype("category")
+    # 分类特征处理
+    categorical_cols = ["hour", "weekday", "month"]
+    for col in categorical_cols:
+        df[col] = df[col].astype(str).astype("category")
 
-    # print(full_data.groupby('stock_id').tail(10))
+        # 创建数据集时添加过滤条件，减少内存占用
+    train_filter = lambda x: x.time_idx <= training_cutoff
+    val_filter = lambda x: (x.time_idx > training_cutoff - history_length) & (x.time_idx <= max_time)
+
+    # 使用更高效的数据类型
+    real_cols = ["open", "high", "low", "close_lag_1", "close_lag_2",
+                 "close_lag_3", "close_lag_4", "close_lag_8",
+                 "close_lag_12", "MA_6", "price_change"]
+    for col in real_cols:
+        df[col] = pd.to_numeric(df[col], downcast="float")
     # 创建时间序列数据集
     dataset = TimeSeriesDataSet(
-        df[lambda x: x.time_idx <= training_cutoff],
+        df[train_filter],
         time_idx="time_idx",
         target="close",
         group_ids=["group_id"],
@@ -140,13 +150,9 @@ def create_datasets(df, prediction_horizon, history_length):
         min_prediction_length=1,
         max_prediction_length=prediction_horizon,
         static_categoricals=["stock_id"],
-        time_varying_known_categoricals=["hour", "weekday", "month"],#已知的未来分类特征
+        time_varying_known_categoricals=categorical_cols,#已知的未来分类特征
         time_varying_known_reals=["time_idx"],
-        time_varying_unknown_reals=[# 注意 target="close",和这里的收盘冲突了 可能进行了多次的标准化
-            "open", "high", "low",
-            "close_lag_1", "close_lag_2", "close_lag_3", "close_lag_4",
-            "close_lag_8", "close_lag_12", "MA_6", "price_change"
-        ],
+        time_varying_unknown_reals=real_cols,
         target_normalizer=GroupNormalizer(groups=["group_id"], transformation="softplus"),
         add_relative_time_idx=True,
         add_target_scales=True,
@@ -156,7 +162,7 @@ def create_datasets(df, prediction_horizon, history_length):
     # 创建验证集
     validation = TimeSeriesDataSet.from_dataset(
         dataset,
-        df[lambda x: x.time_idx > training_cutoff - history_length],
+        df[val_filter],
         predict=True,
         stop_randomization=True
     )
@@ -165,104 +171,129 @@ def create_datasets(df, prediction_horizon, history_length):
 
 # 3. 训练TFT模型
 def train_tft_model(train_dataset, val_dataset, epochs=100):
-    # 创建数据加载器
-    batch_size = 64
-    train_dataloader = train_dataset.to_dataloader(train=True, batch_size=batch_size, num_workers=4)
-    val_dataloader = val_dataset.to_dataloader(train=False, batch_size=batch_size, num_workers=4)
 
-    # 配置TFT模型（初始学习率设为0.1，查找器会自动调整）
+    # 自动确定最优批大小
+    def find_optimal_batch_size():
+        max_batch_size = 256
+        min_batch_size = 32
+        current_batch = min_batch_size
+
+        while current_batch <= max_batch_size:
+            try:
+                # 测试当前批大小是否会导致OOM
+                test_loader = train_dataset.to_dataloader(
+                    train=True,
+                    batch_size=current_batch,
+                    num_workers=min(8, os.cpu_count()//2),
+                    pin_memory=torch.cuda.is_available()
+                )
+                for batch in test_loader:
+                    pass
+                return current_batch
+            except RuntimeError as e:
+                if 'CUDA out of memory' in str(e):
+                    current_batch = current_batch // 2
+                    print(f"批大小 {current_batch*2} 导致OOM，尝试 {current_batch}")
+                    break
+                else:
+                    raise
+        return max(min_batch_size, current_batch)
+
+
+    batch_size = find_optimal_batch_size()
+    print(f"自动确定的批大小: {batch_size}")
+
+    # 数据加载器配置
+    train_dataloader = train_dataset.to_dataloader(
+        train=True,
+        batch_size=batch_size,
+        num_workers=min(16, os.cpu_count()-1),
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=True  # 减少重复初始化开销
+    )
+    val_dataloader = val_dataset.to_dataloader(
+        train=False,
+        batch_size=batch_size*2,  # 验证集可用更大批次
+        num_workers=min(16, os.cpu_count()-1),
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=True
+    )
+
+    # 模型配置
     tft = TemporalFusionTransformer.from_dataset(
         train_dataset,
-        learning_rate=0.1,  # 设为较高值，查找器会找到最优值
-        hidden_size=64,
+        learning_rate=0.03,  # 更保守的初始值
+        hidden_size=32,
         attention_head_size=4,
-        dropout=0.1,
-        hidden_continuous_size=32,
-        output_size=7,# 7个分位数
+        dropout=0.15,  # 稍高的dropout防止过拟合
+        hidden_continuous_size=16,
+        output_size=7,  # 7个分位数
         loss=QuantileLoss(quantiles=[0.02, 0.1, 0.25, 0.5, 0.75, 0.9, 0.98]),
         log_interval=10,
-        reduce_on_plateau_patience=3,
+        reduce_on_plateau_patience=4,
     )
 
-    # 设置回调 主要用于模型训练过程中的优化和监控 防止模型过拟合
-    early_stop_callback = EarlyStopping(
+    # 回调函数
+    early_stop = EarlyStopping(
         monitor="val_loss",
         min_delta=1e-4,
-        patience=10,
+        patience=12,  # 更长的耐心
         verbose=True,
-        mode="min"
+        mode="min",
+        check_finite=True  # 检查NaN值
     )
+    lr_monitor = LearningRateMonitor(logging_interval='epoch')
 
-    # todo 有什么 高级学习率配置的 后面有时间看一下  不重要
-    lr_logger = LearningRateMonitor(logging_interval='step')
-
-
-    pl.seed_everything(42) # 固定所有随机种子，确保实验可复现性  深度学习训练中的权重初始化、数据打乱（shuffle）、Dropout 等操作依赖随机数，固定种子可确保每次运行结果一致
-    # 创建Trainer（先不设置max_epochs）
-    trainer = pl.Trainer(
-        accelerator="auto",  # 自动检测可用硬件（GPU/CPU）
-        devices="auto",      # 自动选择设备数量
-        gradient_clip_val=0.15,
-        callbacks=[early_stop_callback, lr_logger],
-        limit_train_batches=50,  # 限制查找范围
-        limit_val_batches=20,
-        logger=True,  # 启用日志记录（用于可视化）
-    )
-
-    # ========== 学习率查找器 ==========
-    tuner = Tuner(trainer)
-
-    # 运行学习率查找器
-    lr_finder = tuner.lr_find(
-        tft,
-        train_dataloaders=train_dataloader,
-        val_dataloaders=val_dataloader,
-        min_lr=1e-6,
-        max_lr=1.0,
-        # num_training=100,
-        # early_stop_threshold=4.0,
-    )
-
-    # 获取建议学习率（PyTorch Lightning 2.0+ 的正确方式）
-    suggested_lr = lr_finder.suggestion()
-
-    # 可视化学习率曲线
-    fig = lr_finder.plot(suggest=True)
-    fig.show()
-
-    # 手动分析曲线（备选方案）
-    results = lr_finder.results
-    steepest_idx = np.gradient(results['loss']).argmin()
-    manual_lr = results['lr'][steepest_idx]
-
-    print(f"建议学习率（自动）: {suggested_lr:.5f}")
-    print(f"建议学习率（手动最陡点）: {manual_lr:.5f}")
-
-    # 选择更保守的学习率（取两者较小值）
-    optimal_lr = min(suggested_lr, manual_lr)
-    tft.learning_rate = optimal_lr
-
-    # ========== 完整训练 ==========
-    # 重新配置Trainer进行完整训练
+    # 训练器配置
     trainer = pl.Trainer(
         max_epochs=epochs,
-        accelerator="auto",  # 自动检测可用硬件（GPU/CPU）
-        devices="auto",      # 自动选择设备数量
-        gradient_clip_val=0.15,
-        callbacks=[early_stop_callback, lr_logger],
-        enable_checkpointing=True,  # 启用模型检查点
-        default_root_dir="tft_logs",  # 日志目录
+        accelerator="auto",
+        devices="auto",
+        gradient_clip_val=0.2,  # 稍宽松的梯度裁剪
+        callbacks=[early_stop, lr_monitor],
+        enable_checkpointing=True,
+        default_root_dir="tft_logs",
+        deterministic=True,  # 增强可复现性
+        precision="16-mixed" if torch.cuda.is_available() else "32-true",  # 自动混合精度
+        accumulate_grad_batches=2 if batch_size < 64 else 1,  # 小批次时梯度累积
+        logger=True,
+        enable_progress_bar=True,
+        overfit_batches=0  # 禁用过拟合检测
     )
-    # 训练模型
+    # 学习率查找 (安全模式)
+    try:
+        tuner = Tuner(trainer)
+        lr_finder = tuner.lr_find(
+            tft,
+            train_dataloaders=train_dataloader,
+            val_dataloaders=val_dataloader,
+            min_lr=1e-6,
+            max_lr=0.3,
+            num_training=100,
+            early_stop_threshold=None  # 禁用自动停止
+        )
+        suggested_lr = lr_finder.suggestion()
+        print(f"建议学习率: {suggested_lr:.5f}")
+        tft.learning_rate = suggested_lr
+    except Exception as e:
+        print(f"学习率查找失败: {str(e)}，使用默认值0.03")
+        tft.learning_rate = 0.03
+
+    # 完整训练
     trainer.fit(
         tft,
         train_dataloaders=train_dataloader,
         val_dataloaders=val_dataloader,
     )
 
-    # 保存最佳模型  todo
+    # 保存最佳模型
     best_model_path = trainer.checkpoint_callback.best_model_path
     print(f"最佳模型保存于: {best_model_path}")
+
+    # 清理GPU缓存
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     return tft
 
 # 4. 预测函数
@@ -361,7 +392,8 @@ if __name__ == "__main__":
 
     full_data =  pd.read_csv(output_path)
     # check(full_data)
-
+    print("GPU available:", torch.cuda.is_available())
+    print("GPU count:", torch.cuda.device_count())
     # 创建数据集
     prediction_horizon = 8  # 预测未来8小时 (2天)
     history_length = 24      # 使用24小时历史数据
