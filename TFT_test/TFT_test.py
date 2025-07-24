@@ -66,9 +66,19 @@ def load_and_prepare_data(stock_files):
 
         all_data.append(df)
 
+
     # 合并所有股票数据
     all_data = [df for df in all_data if not df.empty]  # 过滤空 DataFrame
     full_df = pd.concat(all_data, ignore_index=True)
+    # 换成非中文的名称
+    column_mapping = {
+        '开盘': 'open',
+        '最高': 'high',
+        '最低': 'low',
+        '收盘': 'close'
+    }
+    # 使用rename方法重命名列
+    full_df = full_df.rename(columns=column_mapping)
 
     # 特征工程增强
     # 按股票标准化数值特征
@@ -78,12 +88,12 @@ def load_and_prepare_data(stock_files):
 
     # 添加滞后特征
     for lag in [1, 2, 3, 4, 8, 12]:  # 1-12小时滞后  todo 这是啥 问一下
-        full_df[f'close_lag_{lag}'] = full_df.groupby('stock_id')['收盘'].shift(lag)
+        full_df[f'close_lag_{lag}'] = full_df.groupby('stock_id')['close'].shift(lag)
 
     # 添加技术指标
-    full_df['MA_6'] = full_df.groupby('stock_id')['收盘'].transform(lambda x: x.rolling(6).mean())
+    full_df['MA_6'] = full_df.groupby('stock_id')['close'].transform(lambda x: x.rolling(6).mean())
     # full_df['price_change'] = full_df.groupby('stock_id')['收盘'].pct_change()
-    full_df['price_change'] = full_df.groupby('stock_id')['收盘'].transform(
+    full_df['price_change'] = full_df.groupby('stock_id')['close'].transform(
         lambda x: np.log((x + eps) / (x.shift(1) + eps))
     ).replace([np.inf, -np.inf], np.nan).fillna(0)
 
@@ -110,9 +120,10 @@ def create_datasets(df, prediction_horizon, history_length):
     prediction_horizon: 预测时间步长 (8小时=2天)
     history_length: 历史数据长度 (24小时=6天)
     """
-    # 首先计算划分点
-    total_length = df["time_idx"].max()
-    train_end = int(total_length * 0.7)
+    # 训练/验证集分割点 (按时间索引)
+    max_time = df["time_idx"].max()
+    training_cutoff = max_time - prediction_horizon - history_length
+
     df["hour"] = df["hour"].astype(str).astype("category")
     df["weekday"] = df["weekday"].astype(str).astype("category")
     df["month"] = df["month"].astype(str).astype("category")
@@ -120,9 +131,9 @@ def create_datasets(df, prediction_horizon, history_length):
     # print(full_data.groupby('stock_id').tail(10))
     # 创建时间序列数据集
     dataset = TimeSeriesDataSet(
-        df[lambda x: x.time_idx <= train_end],
+        df[lambda x: x.time_idx <= training_cutoff],
         time_idx="time_idx",
-        target="收盘",
+        target="close",
         group_ids=["group_id"],
         min_encoder_length=history_length // 2,
         max_encoder_length=history_length,
@@ -131,8 +142,8 @@ def create_datasets(df, prediction_horizon, history_length):
         static_categoricals=["stock_id"],
         time_varying_known_categoricals=["hour", "weekday", "month"],#已知的未来分类特征
         time_varying_known_reals=["time_idx"],
-        time_varying_unknown_reals=[# 注意 target="收盘",和这里的收盘冲突了 可能进行了多次的标准化
-            "开盘", "最高", "最低",
+        time_varying_unknown_reals=[# 注意 target="close",和这里的收盘冲突了 可能进行了多次的标准化
+            "open", "high", "low",
             "close_lag_1", "close_lag_2", "close_lag_3", "close_lag_4",
             "close_lag_8", "close_lag_12", "MA_6", "price_change"
         ],
@@ -145,7 +156,7 @@ def create_datasets(df, prediction_horizon, history_length):
     # 创建验证集
     validation = TimeSeriesDataSet.from_dataset(
         dataset,
-        df[lambda x: (x.time_idx > train_end - history_length)],
+        df[lambda x: x.time_idx > training_cutoff - history_length],
         predict=True,
         stop_randomization=True
     )
@@ -167,7 +178,7 @@ def train_tft_model(train_dataset, val_dataset, epochs=100):
         attention_head_size=4,
         dropout=0.1,
         hidden_continuous_size=32,
-        output_size=11,# 7个分位数
+        output_size=7,# 7个分位数
         loss=QuantileLoss(quantiles=[0.02, 0.1, 0.25, 0.5, 0.75, 0.9, 0.98]),
         log_interval=10,
         reduce_on_plateau_patience=3,
@@ -314,6 +325,7 @@ def process_xlsx_files(folder_path):
 
 path = "D:/MyTool/tdx/T0002/export/OneHour/"
 output_path = path +"dataHandle/20250723.csv"
+# output_path = "20250723.csv"
 eps = 1e-6  # 极小值，防止除零
 def check(full_data):
     # numeric_cols = full_data.columns  # 替换为你的实际列名
@@ -326,15 +338,14 @@ def check(full_data):
     # 检查每个stock_id的时间点数量
     time_counts = full_data.groupby('stock_id')['time_idx'].nunique()
     print("Time points per stock:\n", time_counts.value_counts())
-    print(full_data['收盘'].isna().sum())  # 检查 NaN 的数量
-    print((full_data['收盘'] == np.inf).sum())  # 检查 Inf 的数量
-    print((full_data['收盘'] == -np.inf).sum())  # 检查 -Inf 的数量
+    print(full_data['close'].isna().sum())  # 检查 NaN 的数量
+    print((full_data['close'] == np.inf).sum())  # 检查 Inf 的数量
+    print((full_data['close'] == -np.inf).sum())  # 检查 -Inf 的数量
     # 检查数值范围是否合理
-    print(full_data['收盘'].describe())
+    print(full_data['close'].describe())
 
     # 使用PyTorch严格检查
-    import torch
-    tensor = torch.tensor(full_data['收盘'].values, dtype=torch.float32)
+    tensor = torch.tensor(full_data['close'].values, dtype=torch.float32)
     print(f"非有限值数量: {(~torch.isfinite(tensor)).sum().item()}")
     exit()
 
