@@ -5,7 +5,7 @@ import re
 
 from datetime import datetime
 
-def extract_date(text, return_datetime=False):
+def extract_date(text,type=1, return_datetime=False):
     """
     从字符串中提取日期信息（格式：XXXX年XX月XX日）
 
@@ -18,6 +18,8 @@ def extract_date(text, return_datetime=False):
     """
     # 匹配 "XXXX年XX月XX日" 格式的日期
     date_pattern = r"\d{4}年\d{2}月\d{2}日"
+    if type == 2:
+        date_pattern = r"\d{4}\d{2}\d{2}"
     match = re.search(date_pattern, text)
 
     if not match:

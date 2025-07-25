@@ -29,7 +29,6 @@ with api.connect('60.191.117.167', 7709):
     # # print(api.to_df(datas))
     # grouped = api.to_df(datas).groupby(['time', 'price','buyorsell'], as_index=False)['vol'].sum()
     # print(grouped)
-
-
-    pprint.pprint(api.to_df(api.get_history_transaction_data(0, '000001', 0, 2000,20250603)))
+    data = api.to_df(api.get_history_transaction_data(0, '000001', 0, 2000,20250603))
+    pprint.pprint(data)
     # 明天看看实时的是怎么弄的 分笔成交的 应该是最近的 多拿点 然后过滤掉不要的数据就好了
