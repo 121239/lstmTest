@@ -27,7 +27,7 @@ def get_tick_down(stock_code,stock_files):
     tdx_window.double_click_input(coords=(center_x - rect.left, center_y - rect.top))
     time.sleep(0.1)
     # 运行到最近的时间
-    num = 50
+    num = 30
     while num > 0:
         pyautogui.scroll(-1000)
         num -= 1
@@ -95,8 +95,6 @@ def process_xlsx_files(stock_code):
         return
 
     print(f"找到 {len(xlsx_files)} 个.xls文件:")
-    # for i, filename in enumerate(xlsx_files, 1):
-    #     print(f"{i}. {filename}")
 
     return xlsx_files
 

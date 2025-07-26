@@ -77,39 +77,49 @@ if __name__ == '__main__':
     type = 'SZ#'
     stock_list = tdx_win_tick_down.get_stock_List(type)
     print(f'{type} 数量 :{len(stock_list)}')
+    # 报错超过20次 结束
+    error_num = 0
     for stock_code in stock_list:
-        # 已下载的数据
-        stock_files = tdx_win_tick_down.process_xlsx_files(stock_code)
-        #跳过 stock_files存在 并且有 data_list 的日期
-        if stock_files and set(data_list).issubset(set(stock_files)):
-            print(f'{stock_code} 已存在数据 {len(stock_files)} 跳过')
-            continue
-
-        tdx_post_message(stock_code)
-        # 双击之后再确认 可以弹出分笔数据的框
-        rect = tdx_window.rectangle()
-        center_x = (rect.left + rect.right) // 2
-        center_y = (rect.top + rect.bottom) // 4
-        # print(center_x, center_y)
-        print("开始执行"+stock_code)
 
         try:
-            tdx_window.double_click_input(coords=(center_x - rect.left, center_y - rect.top))
-            time.sleep(0.2)
-            print(len(app.windows()))
-            pyautogui.press('enter')
-            app = Application(backend="win32").connect(title_re=".*PageUp/Down:前后日 空格键:操作*")
-        except Exception as e:
-            print(f"应该是分时页面，再次尝试",{str(e)})
-            tdx_window.double_click_input(coords=(center_x - rect.left, center_y - rect.top))
-            time.sleep(0.2)
-            pyautogui.press('enter')
-            tdx_window.double_click_input(coords=(center_x - rect.left, center_y - rect.top))
-            time.sleep(0.2)
-            pyautogui.press('enter')
-            app = Application(backend="win32").connect(title_re=".*PageUp/Down:前后日 空格键:操作*")
+            # 已下载的数据
+            stock_files = tdx_win_tick_down.process_xlsx_files(stock_code)
+            #跳过 stock_files存在 并且有 data_list 的日期
+            if stock_files and set(data_list).issubset(set(stock_files)):
+                print(f'{stock_code} 已存在数据 {len(stock_files)} 跳过')
+                continue
 
-        tdx_win_tick_down.get_tick_down(stock_code,stock_files)
+            tdx_post_message(stock_code)
+            # 双击之后再确认 可以弹出分笔数据的框
+            rect = tdx_window.rectangle()
+            center_x = (rect.left + rect.right) // 2
+            center_y = (rect.top + rect.bottom) // 4
+            # print(center_x, center_y)
+            print("开始执行"+stock_code)
+
+            try:
+                tdx_window.double_click_input(coords=(center_x - rect.left, center_y - rect.top))
+                time.sleep(0.1)
+                print(len(app.windows()))
+                pyautogui.press('enter')
+                app = Application(backend="win32").connect(title_re=".*PageUp/Down:前后日 空格键:操作*")
+            except Exception as e:
+                print(f"应该是分时页面，再次尝试",{str(e)})
+                tdx_window.double_click_input(coords=(center_x - rect.left, center_y - rect.top))
+                time.sleep(0.1)
+                pyautogui.press('enter')
+                tdx_window.double_click_input(coords=(center_x - rect.left, center_y - rect.top))
+                time.sleep(0.1)
+                pyautogui.press('enter')
+                app = Application(backend="win32").connect(title_re=".*PageUp/Down:前后日 空格键:操作*")
+
+            tdx_win_tick_down.get_tick_down(stock_code,stock_files)
+
+        except Exception as e:
+            error_num += 1
+            if error_num > 20:
+                raise e
+            print(f'{stock_code} 报错 从试一下 num {error_num}')
 
 
 
