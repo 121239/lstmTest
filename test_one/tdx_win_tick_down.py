@@ -7,9 +7,9 @@ import time
 from tdx_win_unit import extract_date, extract_code
 
 
-def get_tick_down(stock_code):
-    #下载tick数据
+def get_tick_down(stock_code,stock_files):
 
+    #下载tick数据
     app = Application(backend="win32").connect(title_re=".*PageUp/Down:前后日 空格键:操作*")  # 匹配含的窗口
     tdx_window = app.window(title_re=".*PageUp/Down:前后日 空格键:操作*")
     print(extract_date(tdx_window.window_text(), return_datetime=True))
@@ -37,26 +37,24 @@ def get_tick_down(stock_code):
     while num < 5:
         pyautogui.scroll(1000)
         num += 1
-    # 已下载的数据
-    stock_files = process_xlsx_files(stock_code)
-    for i in range(300):
+
+    for i in range(100):
         data_time = extract_date(tdx_window.window_text())
         if i % 5 == 0:
             print(data_time)
 
         data = data_time.replace('年', '').replace('月','').replace('日','')
-        if data in stock_files:
+        if stock_files and data in stock_files:
             print(f'数据:{data_time}已存在 跳过')
             pyautogui.scroll(1000)
-            time.sleep(0.1)
             continue
-
+        # else:
+        #     print(f'{stock_code}数据:{data_time}不存在 抓取')
         # 点击控件中心
         tdx_window.right_click_input(coords=(center_x - rect.left, center_y - rect.top))  # 相对坐标
-        time.sleep(0.5)
+        time.sleep(0.1)
         if (i == 0):
             pyautogui.press('pageup')
-            time.sleep(0.2)
 
         # 捕获弹出菜单（根据实际类名调整）
         popup_menu = app.window(class_name="#32768")
@@ -77,7 +75,6 @@ def get_tick_down(stock_code):
 
         tdx_window.click_input(coords=(center_x - rect.left, center_y - rect.top))
         pyautogui.press('pageup')
-        time.sleep(0.2)
 
     # 取消多余窗口
     pyautogui.press('esc')
@@ -103,7 +100,7 @@ def process_xlsx_files(stock_code):
 
     return xlsx_files
 
-def get_stock_List(type='SZ#'):
+def get_stock_List(type):
     """处理文件夹中所有csv文件"""
     folder_path = 'd:/mytool/tdx/T0002/export_day'
     # 获取文件夹中所有.csv文件

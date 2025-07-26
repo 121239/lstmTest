@@ -11,7 +11,7 @@ from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor
 from lightning.pytorch.loggers import TensorBoardLogger
 from sklearn.preprocessing import StandardScaler
 import matplotlib
-# matplotlib.use('TkAgg')
+matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 plt.rcParams['font.sans-serif'] = ['SimHei']
 plt.rcParams['axes.unicode_minus'] = False
@@ -31,8 +31,8 @@ def load_and_prepare_data(stock_files):
         if(len(df) < 360) :
             continue
 
-        if i > 2000:
-            continue
+        # if i > 2000:
+        #     continue
 
         # 添加股票ID
         stock_id = os.path.basename(file_path).split('.')[0]
@@ -169,38 +169,60 @@ def create_datasets(df, prediction_horizon = 8, history_length=24):
 
     return dataset, validation
 
-
-# 3. 训练TFT模型
-def train_tft_model(train_dataset, val_dataset, epochs=100):
-
-
-    # batch_size = find_optimal_batch_size(train_dataset)
-    batch_size = 128
-    print(f"批大小: {batch_size}")
-
-    # 数据加载器配置
+def create_dataloaders(train_dataset, val_dataset, batch_size):
+    """
+    创建训练和验证数据加载器
+    """
     train_dataloader = train_dataset.to_dataloader(
         train=True,
         batch_size=batch_size,
         num_workers=4,
         pin_memory=torch.cuda.is_available(),
-        persistent_workers=True  # 减少重复初始化开销
+        persistent_workers=True
     )
+
     val_dataloader = val_dataset.to_dataloader(
         train=False,
-        batch_size=batch_size*2,  # 验证集可用更大批次
+        batch_size=batch_size * 2,  # 验证集批次通常较大
         num_workers=4,
         pin_memory=torch.cuda.is_available(),
         persistent_workers=True
     )
 
-    # 模型配置
+    return train_dataloader, val_dataloader
+
+
+def create_callbacks():
+    """
+    创建早停回调和学习率监控
+    """
+    early_stop = EarlyStopping(
+        monitor="val_loss",
+        min_delta=1e-4,
+        patience=12,
+        verbose=False,
+        mode="min",
+        check_finite=True
+    )
+
+    lr_monitor = LearningRateMonitor(logging_interval='epoch')
+
+    return [early_stop, lr_monitor]
+
+def train_tft_model(train_dataset, val_dataset, epochs=100):
+    batch_size = 128
+    print(f"批大小: {batch_size}")
+
+    # 创建数据加载器
+    train_dataloader, val_dataloader = create_dataloaders(train_dataset, val_dataset, batch_size)
+
+    # 初始化模型
     tft = TemporalFusionTransformer.from_dataset(
         train_dataset,
-        learning_rate=0.03,  # 更保守的初始值
+        learning_rate=0.03,  # 初始学习率
         hidden_size=32,
         attention_head_size=4,
-        dropout=0.15,  # 稍高的dropout防止过拟合
+        dropout=0.15,
         hidden_continuous_size=16,
         output_size=7,  # 7个分位数
         loss=QuantileLoss(quantiles=[0.02, 0.1, 0.25, 0.5, 0.75, 0.9, 0.98]),
@@ -208,33 +230,24 @@ def train_tft_model(train_dataset, val_dataset, epochs=100):
         reduce_on_plateau_patience=4,
     )
 
-    # 回调函数
-    early_stop = EarlyStopping(
-        monitor="val_loss",
-        min_delta=1e-4,
-        patience=12,  # 更长的耐心
-        verbose=False,
-        mode="min",
-        check_finite=True  # 检查NaN值
-    )
-    lr_monitor = LearningRateMonitor(logging_interval='epoch')
+    # 创建回调
+    callbacks = create_callbacks()
 
     # 训练器配置
     trainer = pl.Trainer(
         max_epochs=epochs,
         accelerator="auto",
         devices="auto",
-        gradient_clip_val=0.2,  # 稍宽松的梯度裁剪
-        callbacks=[early_stop, lr_monitor],
+        gradient_clip_val=0.2,
+        callbacks=callbacks,
         enable_checkpointing=True,
         default_root_dir="tft_logs",
-        # deterministic=True,  # 增强可复现性
-        # precision="16-mixed" if torch.cuda.is_available() else "32-true",  # 自动混合精度
-        accumulate_grad_batches=2 if batch_size < 64 else 1,  # 小批次时梯度累积
+        accumulate_grad_batches=2 if batch_size < 64 else 1,  # 根据批次大小调整梯度累积
         logger=True,
         enable_progress_bar=True,
-        overfit_batches=0  # 禁用过拟合检测
+        overfit_batches=0
     )
+
     # 学习率查找 (安全模式)
     try:
         tuner = Tuner(trainer)
@@ -244,8 +257,7 @@ def train_tft_model(train_dataset, val_dataset, epochs=100):
             val_dataloaders=val_dataloader,
             min_lr=1e-6,
             max_lr=0.3,
-            num_training=100,
-            # early_stop_threshold=None  # 禁用自动停止
+            num_training=100
         )
         suggested_lr = lr_finder.suggestion()
         print(f"建议学习率: {suggested_lr:.5f}")
@@ -254,7 +266,7 @@ def train_tft_model(train_dataset, val_dataset, epochs=100):
         print(f"学习率查找失败: {str(e)}，使用默认值0.03")
         tft.learning_rate = 0.03
 
-    # 完整训练
+    # 开始训练
     trainer.fit(
         tft,
         train_dataloaders=train_dataloader,
@@ -360,9 +372,9 @@ if __name__ == "__main__":
 
 
     # 加载多只股票数据
-    stock_files = process_xlsx_files(path)
+    # stock_files = process_xlsx_files(path)
     # # # 预处理数据
-    full_data = load_and_prepare_data(stock_files)
+    # full_data = load_and_prepare_data(stock_files)
     # exit()
 
     full_data =  pd.read_csv(output_path)
